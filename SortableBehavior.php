@@ -21,10 +21,10 @@ use yii\db\Expression;
  */
 class SortableBehavior extends Behavior
 {
-    const OPERATION_FIRST             = 1;
-    const OPERATION_LAST              = 2;
+    const OPERATION_FIRST = 1;
+    const OPERATION_LAST = 2;
     const OPERATION_POSITION_BACKWARD = 3;
-    const OPERATION_POSITION_FORWARD  = 4;
+    const OPERATION_POSITION_FORWARD = 4;
 
     /**
      * List of attributes, callable or ActiveQuery
@@ -105,10 +105,10 @@ class SortableBehavior extends Behavior
     public function events()
     {
         return [
-            ActiveRecord::EVENT_BEFORE_INSERT   => 'beforeSave',
-            ActiveRecord::EVENT_AFTER_INSERT    => 'afterSave',
-            ActiveRecord::EVENT_BEFORE_UPDATE   => 'beforeSave',
-            ActiveRecord::EVENT_AFTER_UPDATE    => 'afterSave',
+            ActiveRecord::EVENT_BEFORE_INSERT => 'beforeSave',
+            ActiveRecord::EVENT_AFTER_INSERT => 'afterSave',
+            ActiveRecord::EVENT_BEFORE_UPDATE => 'beforeSave',
+            ActiveRecord::EVENT_AFTER_UPDATE => 'afterSave',
         ];
     }
 
@@ -146,7 +146,7 @@ class SortableBehavior extends Behavior
     public function moveTo($position, $forward = true)
     {
         $this->operation = $forward ? self::OPERATION_POSITION_FORWARD : self::OPERATION_POSITION_BACKWARD;
-        $this->position  = (int)$position;
+        $this->position = (int)$position;
         return $this->owner;
     }
 
@@ -204,7 +204,13 @@ class SortableBehavior extends Behavior
         switch ($this->operation) {
             case self::OPERATION_FIRST:
             case self::OPERATION_LAST:
+                $tableName = $this->owner->tableName();
                 $query = $this->getQueryInternal();
+                if ($query instanceof ActiveQuery) {
+                    $alias = array_search($tableName, $query->getTablesUsedInFrom());
+                } else {
+                    $alias = $tableName;
+                }
                 $query->orderBy(null);
                 $position = $this->operation === self::OPERATION_LAST ? $query->max($this->sortAttribute) : $query->min($this->sortAttribute);
 
@@ -213,7 +219,7 @@ class SortableBehavior extends Behavior
                     if ($this->query instanceof ActiveQuery || is_callable($this->query)) {
                         $isSelf = $this->getQueryInternal()
                             ->andWhere([$this->sortAttribute => $position])
-                            ->andWhere($this->selfCondition())
+                            ->andWhere($this->selfCondition($alias))
                             ->exists();
 
                     } else {
@@ -258,13 +264,21 @@ class SortableBehavior extends Behavior
         } elseif (is_callable($this->query)) {
             return call_user_func($this->query, $this->owner);
         } else {
-            $tableName  = $this->owner->tableName();
+            $query = $this->owner->find();
+            $tableName = $this->owner->tableName();
+            if ($query instanceof ActiveQuery) {
+                $alias = array_search($tableName, $query->getTablesUsedInFrom());
+            } else {
+                $alias = $tableName;
+            }
             $attributes = $this->owner->getAttributes($this->query);
             $attributes = array_combine(
-                array_map(function ($value) use ($tableName) { return "{$tableName}.[[{$value}]]"; }, array_keys($attributes)),
+                array_map(function ($value) use ($alias) {
+                    return "{$alias}.[[{$value}]]";
+                }, array_keys($attributes)),
                 array_values($attributes)
             );
-            return $this->owner->find()->andWhere($attributes);
+            return $query->andWhere($attributes);
         }
     }
 
@@ -300,11 +314,11 @@ class SortableBehavior extends Behavior
     }
 
     /**
+     * @param string $tableName
      * @return array
      */
-    protected function selfCondition()
+    protected function selfCondition($tableName)
     {
-        $tableName = $this->owner->tableName();
         $result = [];
         foreach ($this->owner->getPrimaryKey(true) as $field => $value) {
             $result["{$tableName}.[[{$field}]]"] = $value;
@@ -357,30 +371,35 @@ class SortableBehavior extends Behavior
         $this->owner->setAttribute($this->sortAttribute, $position);
 
         $tableName = $this->owner->tableName();
-        $query     = $this->getQueryInternal();
+        $query = $this->getQueryInternal();
+        if ($query instanceof ActiveQuery) {
+            $alias = array_search($tableName, $query->getTablesUsedInFrom());
+        } else {
+            $alias = $tableName;
+        }
         $joinCondition = [
             'and',
             static::getJoinCondition($tableName, $query->where),
             ["n.[[{$this->sortAttribute}]]" => new Expression("{$tableName}.[[{$this->sortAttribute}]] " . ($forward ? '+ 1' : '- 1'))],
         ];
         if (!$this->owner->getIsNewRecord()) {
-            $joinCondition[] = ['not', static::getJoinCondition($tableName, $this->selfCondition())];
+            $joinCondition[] = ['not', static::getJoinCondition($tableName, $this->selfCondition($tableName))];
         }
 
         $exists = $query
-            ->andWhere(["{$tableName}.[[{$this->sortAttribute}]]" => $position])
-            ->andWhere(['not', $this->selfCondition()])
+            ->andWhere(["{$alias}.[[{$this->sortAttribute}]]" => $position])
+            ->andWhere(['not', $this->selfCondition($alias)])
             ->exists();
         if ($exists) {
             $unallocated = $this->getQueryInternal()
-                ->select("{$tableName}.[[{$this->sortAttribute}]]")
+                ->select("{$alias}.[[{$this->sortAttribute}]]")
                 ->leftJoin("{$tableName} n", $joinCondition)
                 ->andWhere([
                     'and',
-                    [$forward ? '>=' : '<=', "{$tableName}.[[{$this->sortAttribute}]]", $position - ($forward ? 1 : -1)],
+                    [$forward ? '>=' : '<=', "{$alias}.[[{$this->sortAttribute}]]", $position - ($forward ? 1 : -1)],
                     ["n.[[{$this->sortAttribute}]]" => null],
                 ])
-                ->orderBy(["{$tableName}.[[{$this->sortAttribute}]]" => $forward ? SORT_ASC : SORT_DESC])
+                ->orderBy(["{$alias}.[[{$this->sortAttribute}]]" => $forward ? SORT_ASC : SORT_DESC])
                 ->limit(1)
                 ->scalar();
             $this->shift($position, $unallocated, $forward);
@@ -395,16 +414,21 @@ class SortableBehavior extends Behavior
     {
         $this->owner->setAttribute($this->sortAttribute, $position);
 
-        $tableName  = $this->owner->tableName();
-        $query      = $this->getQueryInternal();
+        $tableName = $this->owner->tableName();
+        $query = $this->getQueryInternal();
+        if ($query instanceof ActiveQuery) {
+            $alias = array_search($tableName, $query->getTablesUsedInFrom());
+        } else {
+            $alias = $tableName;
+        }
         if (!$this->owner->getIsNewRecord()) {
-            $query->andWhere(['not', $this->selfCondition()]);
+            $query->andWhere(['not', $this->selfCondition($alias)]);
         }
 
         $list = $query
-            ->select("{$tableName}.[[{$this->sortAttribute}]]")
-            ->andWhere([$forward ? '>=' : '<=', "{$tableName}.[[{$this->sortAttribute}]]", $position])
-            ->orderBy(["{$tableName}.[[{$this->sortAttribute}]]" => $forward ? SORT_ASC : SORT_DESC])
+            ->select("{$alias}.[[{$this->sortAttribute}]]")
+            ->andWhere([$forward ? '>=' : '<=', "{$alias}.[[{$this->sortAttribute}]]", $position])
+            ->orderBy(["{$alias}.[[{$this->sortAttribute}]]" => $forward ? SORT_ASC : SORT_DESC])
             ->limit($this->windowSize)
             ->column();
         $unallocated = null;
